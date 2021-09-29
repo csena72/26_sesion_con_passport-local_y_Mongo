@@ -3,7 +3,7 @@ var exphbs = require('express-handlebars');
 
 const app = express();
 const router = express.Router();
-const { PORT } = require('./config/globals');
+const { PORT, MONGO_URI, TIEMPO_EXPIRACION } = require('./config/globals');
 const { getConnection } = require('./dao/db/connection');
 const routes = require("./routes/routes");
 
@@ -19,7 +19,111 @@ const ProductoService = require("./services/producto");
 const MensajeService = require("./services/mensajes");
 const { Mongoose } = require("mongoose");
 const MongoStore = require('connect-mongo');
-const { MONGO_URI } = require("./config/globals");
+
+/* -------------- PASSPORT ----------------- */
+const passport = require('passport');
+const bCrypt = require('bcrypt');
+const LocalStrategy = require('passport-local').Strategy;
+const User = require('./dao/models/usuarios');
+
+passport.use('login', new LocalStrategy({
+    passReqToCallback : true
+  },
+  function(req, username, password, done) { 
+    // check in mongo if a user with username exists or not
+    User.findOne({ 'username' :  username }, 
+      function(err, user) {
+        // In case of any error, return using the done method
+        if (err)
+          return done(err);
+        // Username does not exist, log error & redirect back
+        if (!user){
+          console.log('User Not Found with username '+username);
+          console.log('message', 'User Not found.');                 
+          return done(null, false)
+        }
+        // User exists but wrong password, log the error 
+        if (!isValidPassword(user, password)){
+          console.log('Invalid Password');
+          console.log('message', 'Invalid Password');
+          return done(null, false) 
+        }
+        // User and password both match, return user from 
+        // done method which will be treated like success
+        return done(null, user);
+      }
+    );
+  })
+);
+
+var isValidPassword = function(user, password){
+  return bCrypt.compareSync(password, user.password);
+}
+
+passport.use('register', new LocalStrategy({
+    passReqToCallback : true
+  },
+  function(req, username, password, done) {
+    const findOrCreateUser = function(){
+      // find a user in Mongo with provided username
+      User.findOne({'username':username},function(err, user) {
+        // In case of any error return
+        if (err){
+          console.log('Error in SignUp: '+err);
+          return done(err);
+        }
+        // already exists
+        if (user) {
+          console.log('User already exists');
+          console.log('message','User Already Exists');
+          return done(null, false)
+        } else {
+          // if there is no user with that email
+          // create the user
+          var newUser = new User();
+          // set the user's local credentials
+          newUser.username = username;
+          newUser.password = createHash(password);
+
+          // save the user
+          newUser.save(function(err) {
+            if (err){
+              console.log('Error in Saving user: '+err);  
+              throw err;  
+            }
+            console.log('User Registration succesful');    
+            return done(null, newUser);
+          });
+        }
+      });
+    }
+    // Delay the execution of findOrCreateUser and execute 
+    // the method in the next tick of the event loop
+    process.nextTick(findOrCreateUser);
+  })
+)
+  // Generates hash using bCrypt
+var createHash = function(password){
+  return bCrypt.hashSync(password, bCrypt.genSaltSync(10), null);
+}
+   
+// Configure Passport authenticated session persistence.
+//
+// In order to restore authentication state across HTTP requests, Passport needs
+// to serialize users into and deserialize users out of the session.  The
+// typical implementation of this is as simple as supplying the user ID when
+// serializing, and querying the user record by ID from the database when
+// deserializing.
+passport.serializeUser(function(user, done) {
+  done(null, user._id);
+});
+ 
+passport.deserializeUser(function(id, done) {
+  User.findById(id, function(err, user) {
+    done(err, user);
+  });
+});
+/* ----------------------------------------- */
 
 app.use(express.urlencoded({extended: true}));
 app.use(express.json());
@@ -40,40 +144,68 @@ app.use(
       }
     }),
     secret: process.env.SECRET_KEY,
-    resave: false,
-    saveUninitialized: false,
-  })
-);
+  cookie: {
+   httpOnly: false,
+   secure: false,
+   maxAge: 20000
+ },
+ rolling: true,
+ resave: true,
+ saveUninitialized: false
+}));
 
 app.use(cookieParser());
 app.use(express.json());
 
-app.post("/singup", (req, res, next) => {
-  if (!req.body.username && !req.body.password){
-    throw new Error("No es posible registrarse");
-  } else {    
-    const { username } = req.body;
-    req.session[username] = username;
-    req.session.id = req.session.id ? req.session.id + 1 : 1  
+// Initialize Passport and restore authentication state, if any, from the
+// session.
+app.use(passport.initialize());
+app.use(passport.session());
 
-    res.redirect('/');
-  }    
-});
+// ------------------------------------------------------------------------------
+//  ROUTING GET POST
+// ------------------------------------------------------------------------------
 
-app.post("/login", (req, res, next) => {
-  if (!req.body.username && !req.body.password) throw new Error("No es posible ingresar");
-  const { username } = req.body;
-  if (req.session[username]== username) { 
-    res.redirect('/home');    
-  }else{
-      res.send('No estás registrado')
+app.get('/home', async (req,res) => {
+  if(req.isAuthenticated()){
+    productoService = new ProductoService();
+    let productos = await productoService.getAllProductos();
+      res.render("home", {
+          nombre: req.user.username,
+          productos: productos
+      })
   }
+  else {
+      res.sendFile(process.cwd() + '/')
+  }
+})
+
+app.post('/login', passport.authenticate('login', { failureRedirect: '/faillogin' }), (req,res) => {
+  res.redirect('/home')        
 });
 
-app.post("/logout", (req, res, next) => {
-  req.session.destroy();
-  res.redirect('/');
+app.get('/faillogin', (req,res) => {
+  res.render('login-error', {});
+})
+
+app.post('/register', passport.authenticate('register', { failureRedirect: '/failregister' }), (req,res) => {
+  res.redirect('/') 
 });
+
+app.get('/failregister', (req,res) => {
+  res.render('register-error', {});
+});
+
+app.get('/logout', (req,res) => {
+  let nombre = req.user.username
+  req.logout()
+  res.render("logout", { nombre })
+});
+
+
+// ------------------------------------------------------------------------------
+//  socket io
+// ------------------------------------------------------------------------------
 
 io.on('connection', async (socket) => {
   productoService = new ProductoService();

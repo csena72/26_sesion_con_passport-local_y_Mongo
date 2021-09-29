@@ -1,4 +1,3 @@
-const homeController = require('../controllers/home');
 const loginController = require('../controllers/login');
 const registerController = require('../controllers/register');
 const productoController = require('../controllers/producto');
@@ -9,8 +8,7 @@ module.exports = (router) => {
     router
 
     .get('/', loginController.loginRender)
-    .get('/register', registerController.registerRender)
-    .get('/home', homeController.homeRender)
+    .get('/register', registerController.registerRender)  
 
     .post('/api/productos', productoController.createProducto)
     .get('/api/productos', productoController.findAllProductos)    
